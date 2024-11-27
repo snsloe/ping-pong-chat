@@ -1,0 +1,4 @@
+/home/ubuntu/CLionProjects/untitled/build/CMakeFiles/server.dir
+/home/ubuntu/CLionProjects/untitled/build/CMakeFiles/client.dir
+/home/ubuntu/CLionProjects/untitled/build/CMakeFiles/edit_cache.dir
+/home/ubuntu/CLionProjects/untitled/build/CMakeFiles/rebuild_cache.dir
