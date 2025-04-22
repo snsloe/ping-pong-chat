@@ -7,29 +7,49 @@
 #include <string>
 #include <thread>
 #include <mutex>
+#include <set>
 
 #define PORT 8080
 #define BUFFER_SIZE 1024
 
 std::vector<std::string> messageHistory;
 std::mutex historyMutex;
+std::set<int> clientSockets;
+std::mutex clientSocketsMutex;
 
 void handleError(const char* message) {
     perror(message);
     exit(EXIT_FAILURE);
 }
 
+void broadcastMessage(const std::string& message, int sender_socket) {
+    std::lock_guard<std::mutex> lock(clientSocketsMutex);
+    for (int client_socket : clientSockets) {
+        if (client_socket != sender_socket) { // Не отправляем сообщение отправителю
+            send(client_socket, message.c_str(), message.length(), 0);
+        }
+    }
+}
+
 void handleClient(int client_socket) {
-    char buffer[BUFFER_SIZE] = {0};
-    const char* pong_message = "pong";
+    char buffer[BUFFER_SIZE] = { 0 };
+
+    {
+        std::lock_guard<std::mutex> lock(clientSocketsMutex);
+        clientSockets.insert(client_socket);
+    }
 
     while (true) {
-        memset(buffer, 0, BUFFER_SIZE); // Очищаем буфер
+        memset(buffer, 0, BUFFER_SIZE);
         int valread = read(client_socket, buffer, BUFFER_SIZE);
 
         if (valread <= 0) {
-            std::cerr << "Клиент отключился или произошла ошибка." << std::endl;
+            std::cerr << "Client disconnected or error occurred.\n";
             close(client_socket);
+            {
+                std::lock_guard<std::mutex> lock(clientSocketsMutex);
+                clientSockets.erase(client_socket);
+            }
             break;
         }
 
@@ -40,51 +60,46 @@ void handleClient(int client_socket) {
             continue;
         }
 
-        std::cout << "Получено: " << client_message << std::endl;
+        std::cout << "Received: " << client_message << std::endl;
 
         if (client_message == "ping") {
+            const std::string pong_message = "Server: pong";
+            send(client_socket, pong_message.c_str(), pong_message.length(), 0);
             {
                 std::lock_guard<std::mutex> lock(historyMutex);
-                messageHistory.push_back("You: ping");
+                messageHistory.push_back("Client: ping");
                 messageHistory.push_back("Server: pong");
             }
-            send(client_socket, pong_message, strlen(pong_message), 0);
-            std::cout << "Отправлено: pong" << std::endl;
-
-        } else if (client_message == "exit") {
-            std::cout << "Клиент запросил отключение. Закрытие соединения." << std::endl;
-            break;
-
-        } else if (client_message == "history") {
-            std::cout << "Клиент запросил историю сообщений." << std::endl;
-
-            std::string history = "Show History...\n";
+        }
+        else if (client_message == "history") {
+            std::string history = "Message history:\n";
             {
                 std::lock_guard<std::mutex> lock(historyMutex);
                 for (const auto& entry : messageHistory) {
                     history += entry + "\n";
                 }
             }
-
-            send(client_socket, history.c_str(), history.size(), 0);
+            send(client_socket, history.c_str(), history.length(), 0);
+        }
+        else if (client_message == "exit") {
+            std::cout << "The client requested to disconnect.\n";
+            close(client_socket);
+            {
+                std::lock_guard<std::mutex> lock(clientSocketsMutex);
+                clientSockets.erase(client_socket);
+            }
+            break;
         }
         else {
-            std::cerr << "Неизвестное сообщение: " << client_message << std::endl;
-            std::string response = "Unknown command: " + client_message;
-
+            const std::string full_message = "Client: " + client_message;
             {
                 std::lock_guard<std::mutex> lock(historyMutex);
-                messageHistory.push_back("You: " + client_message);  // Сохраняем запрос клиента
-                messageHistory.push_back("Server: " + response);    // Сохраняем ответ сервера
+                messageHistory.push_back(full_message);
             }
-
-            send(client_socket, response.c_str(), response.size(), 0);
+            broadcastMessage(full_message, client_socket);
         }
     }
-
-    close(client_socket);
 }
-
 
 int main() {
     int server_fd;
@@ -93,36 +108,37 @@ int main() {
     int addrlen = sizeof(address);
 
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        handleError("Ошибка создания сокета");
+        handleError("Socket creation error.");
     }
 
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
-        handleError("Ошибка установки параметров сокета");
+        handleError("Error setting socket options.");
     }
 
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
 
+    // Проверяем, можно ли забиндить порт
     if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
-        handleError("Ошибка привязки сокета");
+        perror("Socket binding error. The server might already be running.");
+        exit(EXIT_FAILURE);
     }
 
-    if (listen(server_fd, 3) < 0) {
-        handleError("Ошибка начала прослушивания");
+    if (listen(server_fd, 10) < 0) {
+        handleError("Error starting listening.");
     }
 
-    std::cout << "Сервер запущен на порту " << PORT << "..." << std::endl;
+    std::cout << "Server is running on port " << PORT << "...\n";
 
     while (true) {
         int client_socket = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen);
         if (client_socket < 0) {
-            std::cerr << "Ошибка подключения клиента" << std::endl;
+            std::cerr << "Client connection error.\n";
             continue;
         }
 
-        std::cout << "Клиент подключился" << std::endl;
-
+        std::cout << "Client connected.\n";
 
         std::thread clientThread(handleClient, client_socket);
         clientThread.detach();
