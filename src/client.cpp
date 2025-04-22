@@ -6,6 +6,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <vector>
+#include <thread>
+#include <mutex>
 
 #define PORT 8080
 #define BUFFER_SIZE 1024
@@ -27,7 +29,43 @@ void saveHistory(const std::vector<std::string>& history) {
     }
 
     fclose(file);
-    std::cout << "'chat_history.txt'." << std::endl;
+    std::cout << "'chat_history.txt' сохранён.\n";
+}
+
+void clearLine() {
+    std::cout << "\33[2K\r"; // Стираем текущую строку в консоли
+}
+
+void receiveMessages(int sock, std::vector<std::string>& history, std::mutex& historyMutex) {
+    char buffer[BUFFER_SIZE] = { 0 };
+
+    while (true) {
+        memset(buffer, 0, BUFFER_SIZE);
+        int valread = read(sock, buffer, BUFFER_SIZE);
+
+        if (valread > 0) {
+            std::string server_message(buffer, valread);
+
+            {
+                std::lock_guard<std::mutex> lock(historyMutex);
+                history.push_back("Server: " + server_message);
+            }
+
+            clearLine(); // Очищаем текущую строку ввода
+            std::cout << "Server: " << server_message << "\n";
+            std::cout << "You: "; // Возвращаем приглашение для ввода
+            std::flush(std::cout); // Обновляем вывод, чтобы не было задержки
+        }
+        else if (valread == 0) {
+            clearLine();
+            std::cout << "You disconnected from the server.\n";
+            break;
+        }
+        else {
+            std::cerr << "Error reading from server.\n";
+            break;
+        }
+    }
 }
 
 int main() {
@@ -35,6 +73,7 @@ int main() {
     struct sockaddr_in server_address;
     char buffer[BUFFER_SIZE] = { 0 };
     std::vector<std::string> history;
+    std::mutex historyMutex;
 
     // Создание сокета
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
@@ -48,45 +87,37 @@ int main() {
         handleError("Invalid address or address not supported");
     }
 
-    // Подключение к серв
+    // Подключение к серверу
     if (connect(sock, (struct sockaddr*)&server_address, sizeof(server_address)) < 0) {
         handleError("Connection to the server failed");
     }
 
     std::cout << "Connected to the server. Type 'exit' to quit.\n";
 
+    // Запускаем поток для получения сообщений
+    std::thread receiveThread(receiveMessages, sock, std::ref(history), std::ref(historyMutex));
+
     while (true) {
         std::cout << "You: ";
         std::string client_message;
         std::getline(std::cin, client_message);
 
-        history.push_back("You: " + client_message);
+        {
+            std::lock_guard<std::mutex> lock(historyMutex);
+            history.push_back("You: " + client_message);
+        }
 
         send(sock, client_message.c_str(), client_message.length(), 0);
 
         if (client_message == "exit") {
             break;
         }
-
-        memset(buffer, 0, BUFFER_SIZE);
-        int valread = read(sock, buffer, BUFFER_SIZE);
-
-        if (valread > 0) {
-            std::string server_response(buffer);
-            std::cout << "Server: " << server_response << "\n";
-
-            history.push_back("Server: " + server_response);
-        }
-        else if (valread == 0) {
-            std::cout << "Server disconnected.\n";
-            break;
-        }
-        else {
-            std::cerr << "Error reading from server.\n";
-            break;
-        }
     }
 
+    // Ждём завершения потока
+    if (receiveThread.joinable()) {
+        receiveThread.join();
+    }
 
     close(sock);
 
